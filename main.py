@@ -11,11 +11,13 @@ COIN_PINS = (6, 7, 8, 9)         # coin mech pulse inputs, one per player
 START_PINS = (10, 11, 12, 13)    # game start pulse outputs, paired with COIN_PINS
 
 DIP_ON_LEVEL = 0        # dip switch to GND with pull-up -> ON reads 0
-COIN_ACTIVE_LEVEL = 0   # coin mech pulls line low during a pulse
-START_ACTIVE_LEVEL = 1  # level driven on the output during a start pulse
+COIN_ACTIVE_LEVEL = 1   # 2N7000 inverts: comparator idles at 12 V (GPIO 0), coin drops it to 0 V (GPIO 1)
+START_ACTIVE_LEVEL = 0  # level on the output during a start pulse
+START_OPEN_DRAIN = True # True: wired direct, line released when idle (needs START_ACTIVE_LEVEL = 0)
+                        # False: push-pull, e.g. driving a 2N7000 gate (START_ACTIVE_LEVEL = 1)
 
 MIN_COINS = 1
-MAX_COINS = 8
+MAX_COINS = 16
 
 COIN_DEBOUNCE_MS = 10   # coin input must be stable this long to count
 PULSE_ON_MS = 500       # start pulse width
@@ -37,8 +39,8 @@ def read_coins_per_credit(pins):
         if pin.value() == DIP_ON_LEVEL:
             v |= 1 << bit
 
-    # 4 bits give 0-15; clamp into the supported MIN_COINS-MAX_COINS range
-    return min(max(v, MIN_COINS), MAX_COINS)
+    # 4 bits give 0-15; offset so all-off = MIN_COINS, giving 1-16 coins
+    return min(v + MIN_COINS, MAX_COINS)
 
 
 # ---------------------------------------------------------------------------
@@ -52,7 +54,8 @@ class Channel:
     def __init__(self, index, coin_pin, start_pin):
         self.index = index
         self.coin = Pin(coin_pin, Pin.IN, Pin.PULL_UP)
-        self.start = Pin(start_pin, Pin.OUT, value=1 - START_ACTIVE_LEVEL)
+        mode = Pin.OPEN_DRAIN if START_OPEN_DRAIN else Pin.OUT
+        self.start = Pin(start_pin, mode, value=1 - START_ACTIVE_LEVEL)
 
         now = time.ticks_ms()
         self.raw = self._coin_active()
