@@ -23,7 +23,8 @@ MAX_COINS = 16
 
 COIN_DEBOUNCE_MS = 10   # coin input must be stable this long to count
 PULSE_ON_MS = 100       # start pulse width
-PULSE_GAP_MS = 100      # minimum gap between consecutive start pulses
+PULSE_GAP_MS = 1250     # minimum gap after any start pulse before the next one, on any channel
+                        # (the game misses starts closer than ~1.2 s apart; tuned with pulse_test.py)
 LOOP_MS = 1
 
 HEARTBEAT_MS = 5000     # onboard LED blips this often to show the program is running
@@ -85,9 +86,6 @@ class StatusLed:
 # Coin input -> start output channel
 # ---------------------------------------------------------------------------
 
-IDLE, PULSE_ON, PULSE_GAP = 0, 1, 2
-
-
 class Channel:
     def __init__(self, index, coin_pin, start_pin, led):
         self.index = index
@@ -104,8 +102,8 @@ class Channel:
 
         self.coins = 0          # coins inserted toward the next credit
         self.pending = 0        # credits waiting to be pulsed out
-        self.state = IDLE
-        self.state_at = now
+        self.pulsing = False
+        self.pulse_at = now
 
     def _coin_active(self):
         return self.coin.value() == COIN_ACTIVE_LEVEL
@@ -125,22 +123,17 @@ class Channel:
         self.led.flash(now, COIN_FLASH_MS)
         print("{} {} ({} toward credit)".format(self.name, source, self.coins))
 
-    def _drive_output(self, now):
-        elapsed = time.ticks_diff(now, self.state_at)
-        if self.state == IDLE:
-            if self.pending:
-                self.pending -= 1
-                self.start.value(START_ACTIVE_LEVEL)
-                self.state = PULSE_ON
-                self.state_at = now
-        elif self.state == PULSE_ON:
-            if elapsed >= PULSE_ON_MS:
-                self.start.value(1 - START_ACTIVE_LEVEL)
-                self.state = PULSE_GAP
-                self.state_at = now
-        elif self.state == PULSE_GAP:
-            if elapsed >= PULSE_GAP_MS:
-                self.state = IDLE
+    def begin_pulse(self, now):
+        # Called by the main loop, which allows only one start pulse at a time
+        self.pending -= 1
+        self.start.value(START_ACTIVE_LEVEL)
+        self.pulsing = True
+        self.pulse_at = now
+
+    def _end_pulse(self, now):
+        if self.pulsing and time.ticks_diff(now, self.pulse_at) >= PULSE_ON_MS:
+            self.start.value(1 - START_ACTIVE_LEVEL)
+            self.pulsing = False
 
     def update(self, now, coins_per_credit):
         self._poll_coin(now)
@@ -148,7 +141,7 @@ class Channel:
             self.coins -= coins_per_credit
             self.pending += 1
             print("{} credit".format(self.name))
-        self._drive_output(now)
+        self._end_pulse(now)
 
 
 # ---------------------------------------------------------------------------
@@ -163,6 +156,8 @@ def main():
 
     button_down = False
     button_at = time.ticks_ms()
+    next_pulse_at = button_at   # no start pulse on any channel before this
+    turn = 0                    # channel checked first for the next pulse (round-robin)
 
     while True:
         now = time.ticks_ms()
@@ -177,6 +172,18 @@ def main():
 
         for ch in channels:
             ch.update(now, coins_per_credit)
+
+        # One start pulse at a time across all channels, taking turns so a
+        # player with several queued credits can't hold up the others
+        if time.ticks_diff(now, next_pulse_at) >= 0:
+            for k in range(len(channels)):
+                ch = channels[(turn + k) % len(channels)]
+                if ch.pending:
+                    ch.begin_pulse(now)
+                    next_pulse_at = time.ticks_add(now, PULSE_ON_MS + PULSE_GAP_MS)
+                    turn = (ch.index + 1) % len(channels)
+                    break
+
         led.update(now)
         time.sleep_ms(LOOP_MS)
 
